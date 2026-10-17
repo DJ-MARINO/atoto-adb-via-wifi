@@ -1,4 +1,10 @@
-# ATOTO S8 ADB via Wi-Fi
+# ATOTO ADB via Wi-Fi (X10 fork)
+
+This fork is being adapted to the **ATOTO X10** (Qualcomm, Android 13). See
+[docs/X10.md](docs/X10.md) for X10 ADB Doctor, the diagnostics app now built
+from this repository. The original S8/FYT notes follow.
+
+## Original: ATOTO S8 ADB via Wi-Fi
 
 [![Android build](https://github.com/lrehmann/atoto-adb-via-wifi/actions/workflows/android.yml/badge.svg)](https://github.com/lrehmann/atoto-adb-via-wifi/actions/workflows/android.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)

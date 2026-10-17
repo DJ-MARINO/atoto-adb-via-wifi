@@ -1,4 +1,4 @@
-package com.lrehmann.atoto.wifiadb;
+package com.djmarino.atoto.x10adb;
 
 import android.content.ComponentName;
 import android.content.Context;
@@ -14,6 +14,12 @@ import android.os.RemoteException;
  * Minimal client for the FYT main-module system-property bridge found on the
  * tested ATOTO S8. This is vendor-specific and intentionally has no fallback
  * to root, boot-image patching, or shell privilege escalation.
+ *
+ * S8G1104MS note: checked against com.syu.ms 25.1119 from the S8G1104MS
+ * firmware (APP20251124 / System20251117). Main module 0 command 161 calls
+ * SystemProperties.set(strings[0], strings[1]), but only when both strings are
+ * non-empty, so a property cannot be cleared with "". The UI still reads the
+ * properties back after every request in case the unit runs other firmware.
  */
 final class FytAdbController implements ServiceConnection {
     interface Listener {
@@ -24,7 +30,9 @@ final class FytAdbController implements ServiceConnection {
     private enum Request {
         TEMPORARY,
         PERSISTENT,
-        DISABLE
+        DISABLE,
+        USB_DEBUGGING_AT_BOOT_ON,
+        USB_DEBUGGING_AT_BOOT_OFF
     }
 
     private static final String TOOLKIT_PACKAGE = "com.syu.ms";
@@ -33,7 +41,7 @@ final class FytAdbController implements ServiceConnection {
     private static final String MODULE_DESCRIPTOR = "com.syu.ipc.IRemoteModule";
     private static final int MAIN_MODULE = 0;
     private static final int SET_ANY_SYSTEM_PROPERTY = 161;
-    private static final int ADB_PORT = 5555;
+    static final int ADB_PORT = 5555;
 
     private final Context context;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -58,6 +66,17 @@ final class FytAdbController implements ServiceConnection {
         request(Request.DISABLE, listener);
     }
 
+    /**
+     * Android 10's AdbService copies persist.sys.usb.config into the
+     * adb_enabled setting at boot. adb_enabled must be 1 for the RSA prompt to
+     * appear, so this is the fallback when the Developer options toggle will
+     * not stay on. Takes effect after a reboot.
+     */
+    void setUsbDebuggingAtBoot(boolean enabled, Listener listener) {
+        request(enabled ? Request.USB_DEBUGGING_AT_BOOT_ON
+                : Request.USB_DEBUGGING_AT_BOOT_OFF, listener);
+    }
+
     boolean isToolkitServicePresent() {
         Intent intent = toolkitIntent();
         return context.getPackageManager().resolveService(intent, 0) != null;
@@ -65,7 +84,7 @@ final class FytAdbController implements ServiceConnection {
 
     private void request(Request request, Listener listener) {
         if (pendingListener != null) {
-            listener.onError("Another FYT request is already in progress.");
+            listener.onError("Another request is already in progress.");
             return;
         }
         pendingListener = listener;
@@ -78,10 +97,10 @@ final class FytAdbController implements ServiceConnection {
         try {
             bound = context.bindService(toolkitIntent(), this, Context.BIND_AUTO_CREATE);
             if (!bound) {
-                fail("FYT ToolkitService did not bind. This firmware may be incompatible.");
+                fail("The head unit's system service did not respond. This firmware may be incompatible.");
             }
         } catch (Exception error) {
-            fail("FYT ToolkitService bind failed: " + safeMessage(error));
+            fail("Could not reach the head unit's system service: " + safeMessage(error));
         }
     }
 
@@ -90,13 +109,27 @@ final class FytAdbController implements ServiceConnection {
         try {
             mainModule = getRemoteModule(service, MAIN_MODULE);
             if (mainModule == null) {
-                fail("The FYT main module was unavailable.");
+                fail("The head unit's system service was unavailable.");
                 return;
             }
             runPendingRequest();
         } catch (Exception error) {
-            fail("FYT module connection failed: " + safeMessage(error));
+            fail("Connection to the head unit's system service failed: " + safeMessage(error));
         }
+    }
+
+    @Override
+    public void onNullBinding(ComponentName name) {
+        // No onServiceConnected follows, so the request would otherwise never finish.
+        unbind();
+        fail("The head unit's system service refused the connection. This firmware may be incompatible.");
+    }
+
+    @Override
+    public void onBindingDied(ComponentName name) {
+        // This binding never reconnects; drop it so the next request binds afresh.
+        unbind();
+        fail("The head unit's system service stopped. Try again.");
     }
 
     @Override
@@ -109,6 +142,10 @@ final class FytAdbController implements ServiceConnection {
     void close() {
         pendingListener = null;
         pendingRequest = null;
+        unbind();
+    }
+
+    private void unbind() {
         if (bound) {
             try {
                 context.unbindService(this);
@@ -128,6 +165,9 @@ final class FytAdbController implements ServiceConnection {
         try {
             switch (request) {
                 case TEMPORARY:
+                    // Clear the persistent port too, so "until reboot" also
+                    // means that when the unit was set to stay on.
+                    setProperty("persist.adb.tcp.port", "-1");
                     setProperty("service.adb.tcp.port", Integer.toString(ADB_PORT));
                     break;
                 case PERSISTENT:
@@ -135,20 +175,29 @@ final class FytAdbController implements ServiceConnection {
                     setProperty("service.adb.tcp.port", Integer.toString(ADB_PORT));
                     break;
                 case DISABLE:
-                    setProperty("persist.adb.tcp.port", "");
+                    // "" is ignored by command 161; adbd treats any port <= 0 as off.
+                    setProperty("persist.adb.tcp.port", "-1");
                     setProperty("service.adb.tcp.port", "-1");
                     break;
+                case USB_DEBUGGING_AT_BOOT_ON:
+                    setProperty("persist.sys.usb.config", "adb");
+                    succeed();
+                    return;
+                case USB_DEBUGGING_AT_BOOT_OFF:
+                    setProperty("persist.sys.usb.config", "none");
+                    succeed();
+                    return;
             }
             mainHandler.postDelayed(() -> {
                 try {
                     setProperty("ctl.restart", "adbd");
                     succeed();
                 } catch (Exception error) {
-                    fail("adbd restart failed: " + safeMessage(error));
+                    fail("Restarting ADB failed: " + safeMessage(error));
                 }
             }, 400L);
         } catch (Exception error) {
-            fail("Wi-Fi ADB property request failed: " + safeMessage(error));
+            fail("The request failed: " + safeMessage(error));
         }
     }
 
@@ -161,7 +210,7 @@ final class FytAdbController implements ServiceConnection {
     private void setProperty(String name, String value) throws RemoteException {
         IBinder module = mainModule;
         if (module == null || !module.isBinderAlive()) {
-            throw new RemoteException("FYT main module disconnected");
+            throw new RemoteException("The system service disconnected");
         }
 
         Parcel data = Parcel.obtain();
@@ -172,7 +221,7 @@ final class FytAdbController implements ServiceConnection {
             data.writeFloatArray(null);
             data.writeStringArray(new String[]{name, value});
             if (!module.transact(1, data, null, IBinder.FLAG_ONEWAY)) {
-                throw new RemoteException("FYT property transaction was rejected");
+                throw new RemoteException("The property request was rejected");
             }
         } finally {
             data.recycle();
@@ -187,7 +236,7 @@ final class FytAdbController implements ServiceConnection {
             data.writeInterfaceToken(TOOLKIT_DESCRIPTOR);
             data.writeInt(module);
             if (!toolkit.transact(1, data, reply, 0)) {
-                throw new RemoteException("FYT toolkit transaction was rejected");
+                throw new RemoteException("The system service rejected the request");
             }
             reply.readException();
             return reply.readStrongBinder();
