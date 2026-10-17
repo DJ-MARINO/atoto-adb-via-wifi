@@ -24,6 +24,7 @@ import android.os.UserManager;
 import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -67,6 +68,19 @@ import java.util.regex.Pattern;
  */
 public final class MainActivity extends Activity {
     static final int REPORT_PORT = 8765;
+    private static final String SETTINGS = "com.android.settings";
+    private static final String EXTRA_SHOW_FRAGMENT = ":settings:show_fragment";
+    private static final String DEVELOPMENT_FRAGMENT =
+            "com.android.settings.development.DevelopmentSettingsDashboardFragment";
+    private static final String WIRELESS_DEBUGGING_FRAGMENT =
+            "com.android.settings.development.WirelessDebuggingFragment";
+    private static final String ABOUT_FRAGMENT =
+            "com.android.settings.deviceinfo.aboutphone.MyDeviceInfoFragment";
+    // Exported Settings activities on the X10 that can host another fragment.
+    private static final String[] FRAGMENT_HOSTS = {
+            "Settings$SystemDashboardActivity", "Settings$MyDeviceInfoActivity",
+            "Settings$DisplaySettingsActivity", "Settings$SecurityDashboardActivity"
+    };
 
     private static final Pattern KEYWORDS = Pattern.compile(
             "(?i)develop|debug|adb|wireless|factory|engineer|hidden|secret|usb|advanced|"
@@ -93,6 +107,8 @@ public final class MainActivity extends Activity {
     private TextView serverView;
     private LinearLayout launchRow;
     private Button fytButton;
+    private EditText customComponent;
+    private EditText customFragment;
     private FytAdbController fyt;
     private volatile String reportText = "Scanning...";
     private volatile ServerSocket server;
@@ -155,7 +171,7 @@ public final class MainActivity extends Activity {
         LinearLayout tools = row();
         tools.addView(button("Rescan", v -> scan()));
         tools.addView(button("Open Developer options", v -> openDeveloperOptions()));
-        tools.addView(button("About (Build number)", v -> launch(new Launch("About",
+        tools.addView(button("ATOTO About", v -> launch(new Launch("About",
                 new Intent(Settings.ACTION_DEVICE_INFO_SETTINGS), null))));
         tools.addView(button("Share report", v -> shareReport()));
         tools.addView(button("Copy report", v -> copyReport()));
@@ -166,6 +182,34 @@ public final class MainActivity extends Activity {
 
         serverView = text("", 15, Color.parseColor("#8FA3B8"));
         root.addView(serverView);
+
+        TextView hiddenTitle = text("Hidden Settings pages (try these first):", 15,
+                Color.parseColor("#8FA3B8"));
+        hiddenTitle.setPadding(0, dp(8), 0, 0);
+        root.addView(hiddenTitle);
+        LinearLayout hiddenRow = row();
+        for (Launch page : hiddenPages()) {
+            hiddenRow.addView(button(page.label, v -> launch(page)));
+        }
+        root.addView(scrollRow(hiddenRow));
+
+        LinearLayout customRow = row();
+        customComponent = new EditText(this);
+        customComponent.setHint("package/.Activity");
+        customComponent.setSingleLine(true);
+        customComponent.setTextColor(Color.WHITE);
+        customComponent.setHintTextColor(Color.parseColor("#5A6B7C"));
+        customComponent.setMinWidth(dp(380));
+        customFragment = new EditText(this);
+        customFragment.setHint("fragment class (optional)");
+        customFragment.setSingleLine(true);
+        customFragment.setTextColor(Color.WHITE);
+        customFragment.setHintTextColor(Color.parseColor("#5A6B7C"));
+        customFragment.setMinWidth(dp(380));
+        customRow.addView(customComponent);
+        customRow.addView(customFragment);
+        customRow.addView(button("Launch", v -> launchCustom()));
+        root.addView(scrollRow(customRow));
 
         TextView launchTitle = text("Screens found on this unit (tap to try):", 15,
                 Color.parseColor("#8FA3B8"));
@@ -397,6 +441,9 @@ public final class MainActivity extends Activity {
                 devRoute = launch;
             }
         }
+        for (Launch page : hiddenPages()) {
+            kv(out, page.label, (resolves(page.intent) ? "resolves" : "no") + "  [" + describe(page.intent) + "]");
+        }
         boolean fytPresent = fyt.isToolkitServicePresent();
         kv(out, "FYT com.syu.ms/app.ToolkitService", fytPresent ? "FOUND" : "not present");
 
@@ -531,13 +578,65 @@ public final class MainActivity extends Activity {
         return info != null && info.activityInfo != null && info.activityInfo.exported;
     }
 
+    /**
+     * The X10's ATOTO About page has no working Build number, but AOSP's own
+     * About phone screen is still exported. Settings activities also accept
+     * :settings:show_fragment, which can open the Developer options and
+     * Wireless debugging fragments even while their own activities are off.
+     */
+    private static List<Launch> hiddenPages() {
+        List<Launch> list = new ArrayList<>();
+        list.add(new Launch("AOSP About phone (tap Build number 7x)",
+                component(SETTINGS, SETTINGS + ".Settings$MyDeviceInfoActivity"), null));
+        for (String host : FRAGMENT_HOSTS) {
+            list.add(new Launch("Wireless debugging via " + hostLabel(host),
+                    fragmentIntent(host, WIRELESS_DEBUGGING_FRAGMENT), null));
+        }
+        for (String host : FRAGMENT_HOSTS) {
+            list.add(new Launch("Developer options via " + hostLabel(host),
+                    fragmentIntent(host, DEVELOPMENT_FRAGMENT), null));
+        }
+        list.add(new Launch("About phone via fragment",
+                fragmentIntent(FRAGMENT_HOSTS[0], ABOUT_FRAGMENT), null));
+        return list;
+    }
+
+    private static Intent fragmentIntent(String host, String fragment) {
+        Intent intent = component(SETTINGS, SETTINGS + "." + host);
+        intent.putExtra(EXTRA_SHOW_FRAGMENT, fragment);
+        intent.putExtra(":settings:show_fragment_as_subsetting", true);
+        return intent;
+    }
+
+    private static String hostLabel(String host) {
+        return host.replace("Settings$", "").replace("Activity", "");
+    }
+
+    private void launchCustom() {
+        String name = customComponent.getText().toString().trim();
+        String fragment = customFragment.getText().toString().trim();
+        ComponentName component = ComponentName.unflattenFromString(name);
+        if (component == null) {
+            toast("Use package/.Activity or package/full.class.Name");
+            return;
+        }
+        Intent intent = new Intent().setComponent(component);
+        if (!fragment.isEmpty()) {
+            intent.putExtra(EXTRA_SHOW_FRAGMENT, fragment);
+            intent.putExtra(":settings:show_fragment_as_subsetting", true);
+        }
+        launch(new Launch("custom " + name, intent, null));
+    }
+
     private static Intent component(String pkg, String cls) {
         return new Intent().setComponent(new ComponentName(pkg, cls));
     }
 
     private static String describe(Intent intent) {
+        String fragment = intent.getStringExtra(EXTRA_SHOW_FRAGMENT);
+        String suffix = fragment == null ? "" : " fragment " + fragment.substring(fragment.lastIndexOf('.') + 1);
         if (intent.getComponent() != null) {
-            return intent.getComponent().flattenToShortString();
+            return intent.getComponent().flattenToShortString() + suffix;
         }
         return String.valueOf(intent.getAction());
     }
