@@ -11,6 +11,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      # Only used by the last step, which runs on main.
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -26,3 +29,14 @@ jobs:
           path: |
             x10-adb-doctor.apk
             app/build/reports/lint-results-debug.html
+      # A rolling pre-release, so the head unit's browser can download the APK
+      # directly (artifacts need a GitHub login and come zipped).
+      - name: Publish x10-latest pre-release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete x10-latest --yes --cleanup-tag || true
+          gh release create x10-latest x10-adb-doctor.apk --prerelease \
+            --target "$GITHUB_SHA" --title "X10 ADB Doctor (latest build)" \
+            --notes "Debug-signed build of ${GITHUB_SHA::7}. Uninstall the previous X10 ADB Doctor before installing a newer one (each build has a new debug key)."
